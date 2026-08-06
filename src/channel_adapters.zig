@@ -191,13 +191,34 @@ fn deriveSlackPeer(input: InboundRouteInput, meta: InboundMetadata) ?agent_routi
 }
 
 fn deriveQQPeer(input: InboundRouteInput, meta: InboundMetadata) ?agent_routing.PeerRef {
+    // QQ group message: chat_id = "group:<group_openid>:<msg_id>".
+    // The session key must be scoped to the group (drop the per-message msg_id)
+    // so all messages in a group share one conversation.
+    if (std.mem.startsWith(u8, input.chat_id, "group:")) {
+        const rest = input.chat_id["group:".len..];
+        const group_id = if (std.mem.indexOfScalar(u8, rest, ':')) |idx|
+            rest[0..idx]
+        else
+            rest;
+        return .{ .kind = .group, .id = group_id };
+    }
+
+    // QQ C2C (private) message: chat_id = "c2c:<user_openid>:<msg_id>".
+    if (std.mem.startsWith(u8, input.chat_id, "c2c:")) {
+        const rest = input.chat_id["c2c:".len..];
+        const user_id = if (std.mem.indexOfScalar(u8, rest, ':')) |idx|
+            rest[0..idx]
+        else
+            rest;
+        return .{ .kind = .direct, .id = user_id };
+    }
+
     const is_dm = meta.is_dm orelse std.mem.startsWith(u8, input.chat_id, "dm:");
+    if (is_dm) return .{ .kind = .direct, .id = input.sender_id };
+
     const raw_channel = meta.channel_id orelse input.chat_id;
     const channel_id = stripPrefix(raw_channel, "channel:");
-    return .{
-        .kind = if (is_dm) .direct else .channel,
-        .id = if (is_dm) input.sender_id else channel_id,
-    };
+    return .{ .kind = .channel, .id = channel_id };
 }
 
 fn deriveOnebotPeer(input: InboundRouteInput, meta: InboundMetadata) ?agent_routing.PeerRef {
@@ -423,6 +444,39 @@ test "web inbound routing uses chat session id for peer" {
 
     try std.testing.expectEqual(agent_routing.ChatType.direct, peer.kind);
     try std.testing.expectEqualStrings("session-42", peer.id);
+}
+
+test "qq inbound routing scopes group/c2c session to peer (drops msg_id)" {
+    const cfg = Config{
+        .workspace_dir = "/tmp",
+        .config_path = "/tmp/config.json",
+        .allocator = std.testing.allocator,
+        .channels = .{
+            .qq = &[_]@import("config_types.zig").QQConfig{
+                .{ .account_id = "main" },
+            },
+        },
+    };
+
+    const desc = findInboundRouteDescriptor(&cfg, "qq") orelse return error.TestUnexpectedResult;
+
+    // Group message: chat_id = "group:<group_openid>:<msg_id>" -> kind=group, id=group_openid (msg_id stripped)
+    const group_peer = (desc.derive_peer(.{
+        .channel_name = "qq",
+        .sender_id = "sender-1",
+        .chat_id = "group:GROUP_OPENID:ROBOT1.0_msg123",
+    }, .{ .is_group = true })) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(agent_routing.ChatType.group, group_peer.kind);
+    try std.testing.expectEqualStrings("GROUP_OPENID", group_peer.id);
+
+    // C2C (private) message: chat_id = "c2c:<user_openid>:<msg_id>" -> kind=direct, id=user_openid
+    const c2c_peer = (desc.derive_peer(.{
+        .channel_name = "qq",
+        .sender_id = "sender-1",
+        .chat_id = "c2c:USER_OPENID:ROBOT1.0_msg456",
+    }, .{ .is_dm = true })) orelse return error.TestUnexpectedResult;
+    try std.testing.expectEqual(agent_routing.ChatType.direct, c2c_peer.kind);
+    try std.testing.expectEqualStrings("USER_OPENID", c2c_peer.id);
 }
 
 test "findInboundRouteDescriptor supports custom maixcam names" {
