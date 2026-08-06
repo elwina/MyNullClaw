@@ -1,3 +1,24 @@
+> # 🦞 Elwina 优化版 MyNullClaw
+>
+> 本仓库是 [nullclaw](https://github.com/nullclaw/nullclaw) 的个人优化版 fork，由 **Elwina** 维护，供个人及小团队自用。
+>
+> ## 与原仓库的差异
+>
+> - **QQ 群聊会话修复**：修复群聊每条消息独立会话、无上下文的 bug，群内消息共享连续上下文。
+> - **内置腾讯会议 skill**：集成 `tmeet-skill`，支持创建/管理/录制/报告腾讯会议，内置"讨论会"、"时长 2 小时"等默认参数，一句话即可开会。
+> - **精简 CI**：移除 nightly、dependabot、issue 模板，保留 `ci`（push 自动编译+测试）与 `release`（打 tag 出正式版）。
+> - **移除 git hooks**：上游 pre-push/pre-commit 钩子在本机环境会误拦，已移除（由 GitHub CI 承担验证）。
+>
+> ## 维护承诺
+>
+> - 持续维护并收录**常用的 skill**（如腾讯会议 tmeet），随使用场景按需增加。
+> - 跟随上游更新，修复个人使用中遇到的问题，并沉淀为可复用的改动。
+> - 保持精简、贴近上游，便于长期维护。
+>
+> 以下为官方原版 README。
+
+---
+
 Want a simpler way to install and configure nullclaw with a UI? Try [nullhub](https://github.com/nullclaw/nullhub)! (currently in beta)
 
 [nullhub](https://github.com/nullclaw/nullhub) provides a UI layer for the Null ecosystem: simpler nullclaw setup and configuration, orchestration from [nullboiler](https://github.com/nullclaw/nullboiler), observability from [nullwatch](https://github.com/nullclaw/nullwatch), and task tracking from [nulltickets](https://github.com/nullclaw/nulltickets).
