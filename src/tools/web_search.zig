@@ -87,7 +87,7 @@ pub const WebSearchTool = struct {
             return ToolResult.fail("'query' must not be empty");
 
         const count = parseCount(args);
-        const provider_raw = root.getString(args, "provider") orelse self.provider;
+        const provider_raw = resolveProviderRaw(self, root.getString(args, "provider"));
 
         var chain_buf: [MAX_PROVIDER_CHAIN]SearchProvider = undefined;
         const chain = buildProviderChain(self, provider_raw, &chain_buf) catch |err| switch (err) {
@@ -129,6 +129,17 @@ pub const WebSearchTool = struct {
         return ToolResult{ .success = false, .output = "", .error_msg = msg };
     }
 };
+
+fn resolveProviderRaw(self: *const WebSearchTool, requested: ?[]const u8) []const u8 {
+    const configured = std.mem.trim(u8, self.provider, " \t\n\r");
+    // A pinned provider (e.g. production `http_request.search_provider=exa`)
+    // must win over model-supplied `provider=duckduckgo`. DuckDuckGo is
+    // unreachable from some regions and would otherwise burn the whole turn.
+    if (configured.len > 0 and !std.ascii.eqlIgnoreCase(configured, "auto")) {
+        return configured;
+    }
+    return requested orelse self.provider;
+}
 
 fn parseProvider(raw: []const u8) ?SearchProvider {
     const trimmed = std.mem.trim(u8, raw, " \t\n\r");
@@ -523,6 +534,18 @@ test "parseProvider accepts aliases" {
     try testing.expectEqual(SearchProvider.duckduckgo, parseProvider("duckduckgo").?);
     try testing.expectEqual(SearchProvider.brave, parseProvider("BRAVE").?);
     try testing.expect(parseProvider("google") == null);
+}
+
+test "resolveProviderRaw pinned config ignores tool-arg override" {
+    // Regression: QQ models pass provider=duckduckgo even when production
+    // pins http_request.search_provider=exa. DuckDuckGo times out in CN.
+    const pinned = WebSearchTool{ .provider = "exa" };
+    try testing.expectEqualStrings("exa", resolveProviderRaw(&pinned, "duckduckgo"));
+    try testing.expectEqualStrings("exa", resolveProviderRaw(&pinned, null));
+
+    const auto = WebSearchTool{ .provider = "auto" };
+    try testing.expectEqualStrings("duckduckgo", resolveProviderRaw(&auto, "duckduckgo"));
+    try testing.expectEqualStrings("auto", resolveProviderRaw(&auto, null));
 }
 
 test "buildProviderChain auto includes searxng when configured" {

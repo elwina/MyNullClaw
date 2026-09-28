@@ -405,12 +405,7 @@ pub fn curlStream(
 
     var prepared_headers = try http_util.prepareCurlHeaderArg(allocator, header_buf[0..header_count]);
     defer prepared_headers.deinit(allocator);
-    if (prepared_headers.arg) |headers_arg| {
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = headers_arg;
-        argc += 1;
-    }
+    try http_util.appendCurlConfigArg(argv_buf[0..], &argc, &prepared_headers, header_buf[0..header_count]);
 
     argv_buf[argc] = "--data-binary";
     argc += 1;
@@ -773,12 +768,7 @@ pub fn curlStreamAnthropic(
 
     var prepared_headers = try http_util.prepareCurlHeaderArg(allocator, header_buf[0..header_count]);
     defer prepared_headers.deinit(allocator);
-    if (prepared_headers.arg) |headers_arg| {
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = headers_arg;
-        argc += 1;
-    }
+    try http_util.appendCurlConfigArg(argv_buf[0..], &argc, &prepared_headers, header_buf[0..header_count]);
 
     argv_buf[argc] = "--data-binary";
     argc += 1;

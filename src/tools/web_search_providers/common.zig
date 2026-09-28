@@ -66,7 +66,7 @@ pub fn curlPostJson(
 ) (ProviderSearchError || error{OutOfMemory})![]u8 {
     if (builtin.is_test) return error.RequestFailed;
 
-    return http_util.curlPostWithProxy(allocator, url, body, headers, null, timeout_secs) catch |err| switch (err) {
+    return http_util.curlPostWithProxyPreferCurl(allocator, url, body, headers, null, timeout_secs) catch |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         else => {
             log.err("curl POST failed: {s} (timeout={s}s)", .{ @errorName(err), timeout_secs });
@@ -340,6 +340,21 @@ test "requireArrayField returns array items" {
 
     const items = try requireArrayField(parsed.object, "results");
     try std.testing.expectEqual(@as(usize, 1), items.len);
+}
+
+test "formatResultsArray accepts Exa title/url-only results" {
+    var parsed = try parseJsonObject(
+        std.testing.allocator,
+        "{\"results\":[{\"id\":\"1\",\"title\":\"Nanjing Normal University\",\"url\":\"https://example.com/nnu\"}]}",
+    );
+    defer parsed.deinit();
+
+    const items = try requireArrayField(parsed.object, "results");
+    const result = try formatResultsArray(std.testing.allocator, items, "nnu", "summary", "text");
+    defer std.testing.allocator.free(result.output);
+    try std.testing.expect(result.success);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "Nanjing Normal University") != null);
+    try std.testing.expect(std.mem.indexOf(u8, result.output, "https://example.com/nnu") != null);
 }
 
 test "requireArrayField rejects missing field" {

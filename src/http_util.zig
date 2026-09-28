@@ -226,9 +226,11 @@ fn validateCurlHeaderLine(header: []const u8) !void {
     if (std.mem.indexOfAny(u8, header, "\r\n") != null) return error.InvalidHeader;
 }
 
-pub fn prepareCurlHeaderArg(allocator: Allocator, headers: []const []const u8) !CurlHeaderArg {
-    if (headers.len == 0) return .{};
-
+fn writeCurlTempBytes(
+    allocator: Allocator,
+    prefix: []const u8,
+    contents: []const u8,
+) !CurlHeaderArg {
     var prepared: CurlHeaderArg = .{};
     const tmp_dir_path = platform.getTempDir(allocator) catch return error.TempDirNotFound;
     defer allocator.free(tmp_dir_path);
@@ -241,8 +243,8 @@ pub fn prepareCurlHeaderArg(allocator: Allocator, headers: []const []const u8) !
         while (attempt < 8) : (attempt += 1) {
             const header_path = std.fmt.bufPrint(
                 &prepared.temp_path_buf,
-                "{s}{s}curl_headers_{x}.tmp",
-                .{ tmp_dir_path, std_compat.fs.path.sep_str, std_compat.crypto.random.int(u64) },
+                "{s}{s}{s}_{x}.tmp",
+                .{ tmp_dir_path, std_compat.fs.path.sep_str, prefix, std_compat.crypto.random.int(u64) },
             ) catch return error.PathTooLong;
             prepared.temp_path_len = header_path.len;
 
@@ -258,28 +260,66 @@ pub fn prepareCurlHeaderArg(allocator: Allocator, headers: []const []const u8) !
     };
     errdefer std_compat.fs.deleteFileAbsolute(prepared.temp_path_buf[0..prepared.temp_path_len]) catch {};
 
-    for (headers) |header| {
-        validateCurlHeaderLine(header) catch {
-            tmp_file.close();
-            return error.InvalidHeader;
-        };
-        tmp_file.writeAll(header) catch {
-            tmp_file.close();
-            return error.TempFileWriteFailed;
-        };
-        tmp_file.writeAll("\n") catch {
-            tmp_file.close();
-            return error.TempFileWriteFailed;
-        };
-    }
+    tmp_file.writeAll(contents) catch {
+        tmp_file.close();
+        return error.TempFileWriteFailed;
+    };
     tmp_file.close();
 
     for (prepared.temp_path_buf[0..prepared.temp_path_len]) |*c| {
         if (c.* == '\\') c.* = '/';
     }
-
-    prepared.arg = try std.fmt.allocPrint(allocator, "@{s}", .{prepared.temp_path_buf[0..prepared.temp_path_len]});
     prepared.uses_temp_file = true;
+    return prepared;
+}
+
+fn createCurlHeaderTempFile(
+    allocator: Allocator,
+    prepared: *CurlHeaderArg,
+    header: []const u8,
+) !void {
+    try validateCurlHeaderLine(header);
+    const line = try std.fmt.allocPrint(allocator, "{s}\n", .{header});
+    defer allocator.free(line);
+    prepared.* = try writeCurlTempBytes(allocator, "curl_headers", line);
+    errdefer prepared.deinit(allocator);
+    // curl `-H @file` sends the file as exactly one header. Keep secrets out of argv.
+    prepared.arg = try std.fmt.allocPrint(allocator, "@{s}", .{prepared.temp_path_buf[0..prepared.temp_path_len]});
+}
+
+/// Append `-H @file` for the credential header plus `-H` for every other header.
+/// curl `-K` is intentionally not used: it consumes stdin and empties `--data-binary @-`.
+pub fn appendCurlConfigArg(
+    argv_buf: []([]const u8),
+    argc: *usize,
+    prepared: *const CurlHeaderArg,
+    headers: []const []const u8,
+) !void {
+    if (prepared.arg) |header_file_arg| {
+        if (argc.* + 2 > argv_buf.len) return error.CurlArgsOverflow;
+        argv_buf[argc.*] = "-H";
+        argc.* += 1;
+        argv_buf[argc.*] = header_file_arg;
+        argc.* += 1;
+    }
+
+    for (headers) |hdr| {
+        if (isCredentialHeader(hdr)) continue;
+        if (argc.* + 2 > argv_buf.len) return error.CurlArgsOverflow;
+        argv_buf[argc.*] = "-H";
+        argc.* += 1;
+        argv_buf[argc.*] = hdr;
+        argc.* += 1;
+    }
+}
+
+pub fn prepareCurlHeaderArg(allocator: Allocator, headers: []const []const u8) !CurlHeaderArg {
+    var prepared: CurlHeaderArg = .{};
+    for (headers) |header| {
+        if (!isCredentialHeader(header)) continue;
+        try createCurlHeaderTempFile(allocator, &prepared, header);
+        return prepared;
+    }
     return prepared;
 }
 
@@ -301,14 +341,10 @@ fn appendPreparedCurlHeaders(
     argv_buf: []([]const u8),
     argc: *usize,
     headers: []const []const u8,
-    prepared_arg: ?[]const u8,
+    prepared: *const CurlHeaderArg,
 ) !void {
-    if (prepared_arg) |headers_arg| {
-        if (argc.* + 2 > argv_buf.len) return error.CurlArgsOverflow;
-        argv_buf[argc.*] = "-H";
-        argc.* += 1;
-        argv_buf[argc.*] = headers_arg;
-        argc.* += 1;
+    if (prepared.arg != null) {
+        try appendCurlConfigArg(argv_buf, argc, prepared, headers);
         return;
     }
 
@@ -645,6 +681,32 @@ pub fn curlPostWithProxyAndResolve(
         proxy,
         max_time,
         resolve_entry,
+        false,
+    );
+}
+
+/// Same as `curlPostWithProxy`, but never switches to the std.http fallback.
+/// Search providers use this so `x-api-key` requests take the curl header-file
+/// path that production can actually reach.
+pub fn curlPostWithProxyPreferCurl(
+    allocator: Allocator,
+    url: []const u8,
+    body: []const u8,
+    headers: []const []const u8,
+    proxy: ?[]const u8,
+    max_time: ?[]const u8,
+) ![]u8 {
+    return curlRequestWithProxy(
+        allocator,
+        "POST",
+        "Content-Type: application/json",
+        url,
+        body,
+        headers,
+        proxy,
+        max_time,
+        null,
+        true,
     );
 }
 
@@ -678,6 +740,7 @@ pub fn curlPostFormWithProxyAndResolve(
         proxy,
         max_time,
         resolve_entry,
+        false,
     );
 }
 
@@ -691,8 +754,9 @@ fn curlRequestWithProxy(
     proxy: ?[]const u8,
     max_time: ?[]const u8,
     resolve_entry: ?[]const u8,
+    skip_http_fallback: bool,
 ) ![]u8 {
-    if (credentialedCurlUsesHttpFallback(url, headers, resolve_entry)) {
+    if (!skip_http_fallback and credentialedCurlUsesHttpFallback(url, headers, resolve_entry)) {
         const method_enum = std.meta.stringToEnum(std.http.Method, method) orelse return error.UnsupportedHttpMethod;
         const content_type = contentTypeHeaderValue(content_type_header) orelse return error.InvalidHeader;
         const resp = try httpRequestWithStatus(allocator, method_enum, url, body, headers, content_type, proxy);
@@ -733,19 +797,30 @@ fn curlRequestWithProxy(
         argc += 1;
     }
 
-    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, prepared_headers.arg);
+    // PreferCurl already adds Content-Type above. A second Content-Type makes
+    // Exa treat the JSON body as missing ("expected object, received undefined").
+    var filtered_headers: [16][]const u8 = undefined;
+    var filtered_count: usize = 0;
+    for (headers) |hdr| {
+        if (contentTypeHeaderValue(hdr) != null) continue;
+        if (filtered_count >= filtered_headers.len) return error.TooManyHeaders;
+        filtered_headers[filtered_count] = hdr;
+        filtered_count += 1;
+    }
+    try appendPreparedCurlHeaders(argv_buf[0..], &argc, filtered_headers[0..filtered_count], &prepared_headers);
 
-    // Pass payload via stdin to avoid OS argv length limits for large JSON
-    // bodies (e.g. multimodal base64 images).
+    // Search/provider JSON is small. Passing it as a curl argv value matches the
+    // command that works on this host. `--data-binary @-` is empty with musl Child
+    // stdin, and `-K` also consumes stdin.
     argv_buf[argc] = "--data-binary";
     argc += 1;
-    argv_buf[argc] = "@-";
+    argv_buf[argc] = body;
     argc += 1;
     argv_buf[argc] = url;
     argc += 1;
 
     var child = std_compat.process.Child.init(argv_buf[0..argc], allocator);
-    child.stdin_behavior = .Pipe;
+    child.stdin_behavior = .Ignore;
     child.stdout_behavior = .Pipe;
     child.stderr_behavior = .Pipe;
 
@@ -765,22 +840,6 @@ fn curlRequestWithProxy(
     var stderr_capture = StderrCapture{};
     var stderr_thread = startStderrCapture(&child, &stderr_capture);
     defer if (stderr_thread) |thread| thread.join();
-
-    if (child.stdin) |stdin_file| {
-        stdin_file.writeAll(body) catch {
-            stdin_file.close();
-            child.stdin = null;
-            _ = child.kill() catch {};
-            _ = child.wait() catch {};
-            return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlWriteError;
-        };
-        stdin_file.close();
-        child.stdin = null;
-    } else {
-        _ = child.kill() catch {};
-        _ = child.wait() catch {};
-        return if (cancel_flag != null and cancel_flag.?.load(.acquire)) error.CurlInterrupted else error.CurlWriteError;
-    }
 
     const stdout = child.stdout.?.readToEndAlloc(allocator, DEFAULT_CURL_POST_MAX_BYTES) catch {
         _ = child.kill() catch {};
@@ -896,7 +955,7 @@ pub fn curlPostWithStatusAndTimeoutAndResolve(
     argv_buf[argc] = "Content-Type: application/json";
     argc += 1;
 
-    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, prepared_headers.arg);
+    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, &prepared_headers);
 
     argv_buf[argc] = "--data-binary";
     argc += 1;
@@ -1036,7 +1095,7 @@ pub fn curlPostWithStatusHeadersAndTimeoutAndResolve(
     argv_buf[argc] = "Content-Type: application/json";
     argc += 1;
 
-    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, prepared_headers.arg);
+    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, &prepared_headers);
 
     // Dump response headers to stdout so we can capture session IDs.
     argv_buf[argc] = "-D";
@@ -1187,7 +1246,7 @@ pub fn curlGetWithStatusAndTimeoutAndResolve(
 
     appendCurlResolveArgs(argv_buf[0..], &argc, resolve_entry);
 
-    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, prepared_headers.arg);
+    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, &prepared_headers);
 
     argv_buf[argc] = "-w";
     argc += 1;
@@ -1265,6 +1324,7 @@ pub fn curlPut(allocator: Allocator, url: []const u8, body: []const u8, headers:
         null,
         null,
         null,
+        false,
     );
 }
 
@@ -1313,7 +1373,7 @@ fn curlGetWithProxyAndResolve(
         argc += 1;
     }
 
-    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, prepared_headers.arg);
+    try appendPreparedCurlHeaders(argv_buf[0..], &argc, headers, &prepared_headers);
 
     argv_buf[argc] = url;
     argc += 1;
@@ -1967,7 +2027,8 @@ test "prepareCurlHeaderArg writes headers outside argv" {
     var prepared = try prepareCurlHeaderArg(std.testing.allocator, &.{ "Authorization: Bearer test-token", "X-Test: ok" });
     defer prepared.deinit(std.testing.allocator);
 
-    // Regression: direct curl callers can keep credential headers out of argv.
+    // Regression: curl -H @file is a single header. Only the credential line
+    // goes in the file; other headers are appended as regular -H args.
     try std.testing.expect(prepared.uses_temp_file);
     try std.testing.expect(prepared.arg != null);
     try std.testing.expect(std.mem.startsWith(u8, prepared.arg.?, "@"));
@@ -1976,7 +2037,110 @@ test "prepareCurlHeaderArg writes headers outside argv" {
     defer file.close();
     const content = try file.readToEndAlloc(std.testing.allocator, 1024);
     defer std.testing.allocator.free(content);
-    try std.testing.expectEqualStrings("Authorization: Bearer test-token\nX-Test: ok\n", content);
+    try std.testing.expectEqualStrings("Authorization: Bearer test-token\n", content);
+}
+
+test "appendCurlConfigArg keeps credential file and extra headers separate" {
+    var prepared = try prepareCurlHeaderArg(std.testing.allocator, &.{ "x-api-key: test-key", "Accept: application/json" });
+    defer prepared.deinit(std.testing.allocator);
+
+    var argv_buf: [8][]const u8 = undefined;
+    var argc: usize = 0;
+    try appendCurlConfigArg(argv_buf[0..], &argc, &prepared, &.{ "x-api-key: test-key", "Accept: application/json" });
+    try std.testing.expectEqual(@as(usize, 4), argc);
+    try std.testing.expectEqualStrings("-H", argv_buf[0]);
+    try std.testing.expectEqualStrings(prepared.arg.?, argv_buf[1]);
+    try std.testing.expectEqualStrings("-H", argv_buf[2]);
+    try std.testing.expectEqualStrings("Accept: application/json", argv_buf[3]);
+}
+
+test "prefer-curl posts x-api-key as its own header" {
+    // Regression: `-H @file` collapses every header into one line, so Exa
+    // never sees `x-api-key` and web_search returns InvalidResponse.
+    if (comptime @import("builtin").os.tag == .wasi) return error.SkipZigTest;
+
+    const allocator = std.testing.allocator;
+    const addr = try std_compat.net.Address.resolveIp("127.0.0.1", 0);
+    var server = try addr.listen(.{});
+    defer server.deinit();
+
+    var ctx = CredentialedCurlFallbackServerCtx{
+        .server = &server,
+        .expected_method = "POST",
+    };
+    var thread = try std.Thread.spawn(.{}, servePreferCurlHeaderTest, .{&ctx});
+
+    const url = try std.fmt.allocPrint(allocator, "http://127.0.0.1:{d}/exa", .{server.listen_address.in.getPort()});
+    defer allocator.free(url);
+    const headers = [_][]const u8{
+        "x-api-key: test-key",
+        "Content-Type: application/json",
+        "Accept: application/json",
+    };
+
+    const body = curlPostWithProxyPreferCurl(allocator, url, "{\"query\":\"nnu\"}", &headers, null, "5") catch |err| {
+        if (!ctx.saw_request.load(.acquire)) {
+            unblockCredentialedCurlFallbackServer(&server);
+        }
+        thread.join();
+        return err;
+    };
+    defer allocator.free(body);
+
+    if (!ctx.saw_request.load(.acquire)) {
+        unblockCredentialedCurlFallbackServer(&server);
+    }
+    thread.join();
+
+    try std.testing.expectEqualStrings("{\"ok\":true}", body);
+    try std.testing.expect(ctx.saw_expected_method.load(.acquire));
+    try std.testing.expect(ctx.saw_authorization.load(.acquire));
+}
+
+fn servePreferCurlHeaderTest(ctx: *CredentialedCurlFallbackServerCtx) void {
+    var conn = ctx.server.accept() catch return;
+    defer conn.stream.close();
+
+    var buf: [2048]u8 = undefined;
+    var filled: usize = 0;
+    while (filled < buf.len) {
+        const n = conn.stream.read(buf[filled..]) catch return;
+        if (n == 0) break;
+        filled += n;
+        if (std.mem.indexOf(u8, buf[0..filled], "\r\n\r\n") != null) {
+            if (filled < buf.len) {
+                const more = conn.stream.read(buf[filled..]) catch 0;
+                filled += more;
+            }
+            break;
+        }
+    }
+
+    const request = buf[0..filled];
+    ctx.saw_request.store(true, .release);
+    if (std.mem.startsWith(u8, request, ctx.expected_method) and
+        request.len > ctx.expected_method.len and
+        request[ctx.expected_method.len] == ' ')
+    {
+        ctx.saw_expected_method.store(true, .release);
+    }
+    // Must be a standalone header, not mashed into Content-Type / Accept,
+    // and the JSON body must actually arrive (stdin @- is empty on musl).
+    if (std.mem.indexOf(u8, request, "\r\nx-api-key: test-key\r\n") != null and
+        std.mem.indexOf(u8, request, "\r\nAccept: application/json\r\n") != null and
+        std.mem.indexOf(u8, request, "{\"query\":\"nnu\"}") != null)
+    {
+        ctx.saw_authorization.store(true, .release);
+    }
+
+    const response =
+        "HTTP/1.1 200 OK\r\n" ++
+        "Content-Type: application/json\r\n" ++
+        "Content-Length: 11\r\n" ++
+        "Connection: close\r\n" ++
+        "\r\n" ++
+        "{\"ok\":true}";
+    conn.stream.writeAll(response) catch {};
 }
 
 test "prepareCurlHeaderArg rejects newline injection" {
