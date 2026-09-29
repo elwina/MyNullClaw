@@ -808,6 +808,66 @@ pub fn parseGatewayPath(wss_url: []const u8) []const u8 {
 }
 
 const invalid_socket: std.posix.socket_t = if (builtin.os.tag == .windows) std_compat.net.invalidHandle(std.posix.socket_t) else -1;
+
+const MdLink = struct {
+    label: []const u8,
+    url: []const u8,
+    consumed: usize,
+};
+
+fn parseMdLink(text: []const u8) ?MdLink {
+    if (text.len < 5 or text[0] != '[') return null;
+    const close_label = std.mem.indexOfScalarPos(u8, text, 1, ']') orelse return null;
+    if (close_label + 1 >= text.len or text[close_label + 1] != '(') return null;
+    const close_url = std.mem.indexOfScalarPos(u8, text, close_label + 2, ')') orelse return null;
+    return .{
+        .label = text[1..close_label],
+        .url = text[close_label + 2 .. close_url],
+        .consumed = close_url + 1,
+    };
+}
+
+/// Official QQ does not render Markdown. Prompt text cannot stop models from
+/// emitting `**` because AGENTS.md itself is written in Markdown.
+fn stripQqMarkdown(allocator: std.mem.Allocator, text: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var i: usize = 0;
+    var at_line_start = true;
+    while (i < text.len) {
+        if (at_line_start) {
+            var hashes: usize = 0;
+            while (i + hashes < text.len and text[i + hashes] == '#' and hashes < 6) hashes += 1;
+            if (hashes > 0 and i + hashes < text.len and text[i + hashes] == ' ') {
+                i += hashes + 1;
+                at_line_start = false;
+                continue;
+            }
+        }
+        if (i + 1 < text.len and ((text[i] == '*' and text[i + 1] == '*') or (text[i] == '_' and text[i + 1] == '_'))) {
+            i += 2;
+            continue;
+        }
+        if (parseMdLink(text[i..])) |link| {
+            if (link.label.len > 0) {
+                try out.appendSlice(allocator, link.label);
+                if (link.url.len > 0) try out.append(allocator, ' ');
+            }
+            if (link.url.len > 0) try out.appendSlice(allocator, link.url);
+            i += link.consumed;
+            at_line_start = false;
+            continue;
+        }
+
+        const c = text[i];
+        try out.append(allocator, c);
+        at_line_start = c == '\n';
+        i += 1;
+    }
+    return out.toOwnedSlice(allocator);
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // QQChannel
 // ════════════════════════════════════════════════════════════════════════════
@@ -1275,6 +1335,8 @@ pub const QQChannel = struct {
     ///   "user:<user_openid>"    — alias for c2c
     ///   "<user_openid>"         — defaults to c2c (zeroclaw parity)
     pub fn sendMessage(self: *QQChannel, target: []const u8, text: []const u8) !void {
+        const plain = try stripQqMarkdown(self.allocator, text);
+        defer self.allocator.free(plain);
         const ChunkSend = struct {
             channel: *QQChannel,
             chunk: []const u8,
@@ -1303,7 +1365,7 @@ pub const QQChannel = struct {
 
         var msg_seq: u32 = 1;
         if (supports_media_upload) {
-            var parsed = try parseOutgoingContent(self.allocator, text);
+            var parsed = try parseOutgoingContent(self.allocator, plain);
             defer parsed.deinit(self.allocator);
 
             if (parsed.text.len > 0) {
@@ -1335,7 +1397,7 @@ pub const QQChannel = struct {
             return;
         }
 
-        var it = root.splitMessage(text, MAX_MESSAGE_LEN);
+        var it = root.splitMessage(plain, MAX_MESSAGE_LEN);
         while (it.next()) |chunk| {
             var chunk_send = ChunkSend{
                 .channel = self,
@@ -2157,6 +2219,28 @@ test "qq parseOutgoingContent keeps non-remote marker as text" {
 
     try std.testing.expectEqualStrings("[IMAGE:/tmp/a.png]\nhello", parsed.text);
     try std.testing.expectEqual(@as(usize, 0), parsed.image_urls.len);
+}
+
+test "stripQqMarkdown removes emphasis markers the model copies from AGENTS.md" {
+    // Regression: official QQ shows `**` literally; prompt-only guidance is not enough.
+    const stripped = try stripQqMarkdown(std.testing.allocator, "- **登录状态**：已登录");
+    defer std.testing.allocator.free(stripped);
+    try std.testing.expectEqualStrings("- 登录状态：已登录", stripped);
+}
+
+test "stripQqMarkdown keeps single asterisks and converts markdown links" {
+    const stripped = try stripQqMarkdown(
+        std.testing.allocator,
+        "# 标题\nsee [docs](https://example.com) and 3*4=__12__",
+    );
+    defer std.testing.allocator.free(stripped);
+    try std.testing.expectEqualStrings("标题\nsee docs https://example.com and 3*4=12", stripped);
+}
+
+test "stripQqMarkdown is a no-op for plain QQ text" {
+    const stripped = try stripQqMarkdown(std.testing.allocator, "黄和任南京师范大学校长");
+    defer std.testing.allocator.free(stripped);
+    try std.testing.expectEqualStrings("黄和任南京师范大学校长", stripped);
 }
 
 test "qq ensureHttpsMediaUrl rejects http" {

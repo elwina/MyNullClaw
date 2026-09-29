@@ -285,13 +285,7 @@ fn runCurlRequestWithStatus(
 
     var prepared_headers = try http_util.prepareCurlHeaderArg(allocator, header_lines.items);
     defer prepared_headers.deinit(allocator);
-    if (prepared_headers.arg) |headers_arg| {
-        if (argc + 2 > argv_buf.len) return error.CurlArgsOverflow;
-        argv_buf[argc] = "-H";
-        argc += 1;
-        argv_buf[argc] = headers_arg;
-        argc += 1;
-    }
+    try http_util.appendCurlConfigArg(argv_buf[0..], &argc, &prepared_headers, header_lines.items);
 
     if (body != null) {
         if (argc + 2 + 3 > argv_buf.len) return error.CurlArgsOverflow;

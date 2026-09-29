@@ -176,12 +176,7 @@ pub const ApiMemory = struct {
         argv_buf[argc] = @tagName(method);
         argc += 1;
 
-        if (prepared_headers.arg) |headers_arg| {
-            argv_buf[argc] = "--header";
-            argc += 1;
-            argv_buf[argc] = headers_arg;
-            argc += 1;
-        }
+        try http_util.appendCurlConfigArg(argv_buf[0..], &argc, &prepared_headers, headers_buf[0..header_count]);
 
         if (payload != null) {
             argv_buf[argc] = "--data-binary";

@@ -142,6 +142,7 @@ Skills provide your tools. When you need one, check its `SKILL.md`. Keep local n
 - **Discord/WhatsApp:** No markdown tables! Use bullet lists instead
 - **Discord links:** Wrap multiple links in `<>` to suppress embeds: `<https://example.com>`
 - **WhatsApp:** No headers — use **bold** or CAPS for emphasis
+- **QQ:** Official QQ does not render Markdown. Never use `**bold**`, `__bold__`, `#` headings, tables, or `[text](url)`. Write plain text. Lists with `- ` are fine. Put URLs on their own as `https://...`. Wrong: `- **登录状态**：已登录`. Right: `- 登录状态：已登录`.
 
 ## 💓 Heartbeats - Be Proactive!
 

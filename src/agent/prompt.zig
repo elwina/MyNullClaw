@@ -397,6 +397,20 @@ pub fn buildSystemPrompt(
             try w.writeAll("```\nschedule action=once delay=30m command=\"echo \\\"Time is up!\\\"\"\n```\n\n");
             try w.writeAll("The command output will be automatically delivered to this chat.\n\n");
         }
+
+        if (cc.channel) |ch| {
+            if (std.ascii.eqlIgnoreCase(ch, "qq")) {
+                try w.writeAll("## QQ Message Formatting\n\n");
+                try w.writeAll("You are talking on QQ. Official QQ chats do not render Markdown.\n");
+                try w.writeAll("User-visible replies must be plain text.\n");
+                try w.writeAll("- Do not wrap words in `**` or `__`. They appear as literal asterisks.\n");
+                try w.writeAll("- Do not use `#` headings, markdown tables, or `[text](url)` links.\n");
+                try w.writeAll("- Lists may use `- ` or `1. `. Write URLs as bare https:// links.\n");
+                try w.writeAll("- For emphasis, use 中文破折号、顿号, or CAPS — never `**bold**`.\n");
+                try w.writeAll("Wrong: `- **登录状态**：已登录`\n");
+                try w.writeAll("Right: `- 登录状态：已登录`\n\n");
+            }
+        }
     }
 
     // Schedule tool guidance for all contexts (including private chats)
@@ -1379,6 +1393,41 @@ test "buildSystemPrompt omits telegram-only group marker guidance for non-telegr
 
     try std.testing.expect(std.mem.indexOf(u8, prompt, "## Group Chat Behavior") == null);
     try std.testing.expect(std.mem.indexOf(u8, prompt, "[NO_REPLY]") == null);
+}
+
+test "buildSystemPrompt includes qq plain-text formatting guidance" {
+    const allocator = std.testing.allocator;
+    const prompt = try buildSystemPrompt(allocator, .{
+        .workspace_dir = "/tmp/nonexistent",
+        .model_name = "test-model",
+        .tools = &.{},
+        .conversation_context = .{
+            .channel = "qq",
+            .is_group = true,
+            .group_id = "group-openid-1",
+        },
+    });
+    defer allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "## QQ Message Formatting") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "do not render Markdown") != null);
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "Right: `- 登录状态：已登录`") != null);
+}
+
+test "buildSystemPrompt omits qq formatting guidance on other channels" {
+    const allocator = std.testing.allocator;
+    const prompt = try buildSystemPrompt(allocator, .{
+        .workspace_dir = "/tmp/nonexistent",
+        .model_name = "test-model",
+        .tools = &.{},
+        .conversation_context = .{
+            .channel = "telegram",
+            .is_group = false,
+        },
+    });
+    defer allocator.free(prompt);
+
+    try std.testing.expect(std.mem.indexOf(u8, prompt, "## QQ Message Formatting") == null);
 }
 
 test "buildSystemPrompt includes telegram group marker guidance for telegram groups" {
